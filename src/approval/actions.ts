@@ -34,10 +34,39 @@ export function mergeWorktreeBranch(
   branch: string,
   message: string,
 ): void {
-  execFileSync('git', ['merge', '--no-ff', branch, '-m', message], {
-    cwd: repoPath,
-    timeout: 30000,
-  });
+  // Stash any uncommitted changes before merging
+  let stashed = false;
+  try {
+    const status = execFileSync('git', ['status', '--porcelain'], {
+      cwd: repoPath,
+      encoding: 'utf-8',
+      timeout: 5000,
+    }).trim();
+    if (status.length > 0) {
+      execFileSync('git', ['stash', 'push', '-m', `brainlink-pre-merge-${branch}`], {
+        cwd: repoPath,
+        timeout: 10000,
+      });
+      stashed = true;
+    }
+  } catch { /* no changes to stash */ }
+
+  try {
+    execFileSync('git', ['merge', '--no-ff', branch, '-m', message], {
+      cwd: repoPath,
+      timeout: 30000,
+    });
+  } finally {
+    // Restore stashed changes after merge (even if merge fails)
+    if (stashed) {
+      try {
+        execFileSync('git', ['stash', 'pop'], { cwd: repoPath, timeout: 10000 });
+      } catch {
+        // Stash pop conflict — leave in stash, user can resolve manually
+        console.error(`[Gateway] Stash pop conflict after merge of ${branch}. Run 'git stash pop' manually.`);
+      }
+    }
+  }
 }
 
 export function pushBranch(

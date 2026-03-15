@@ -1,8 +1,10 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { buildClaudeCodePrompt } from './prompts/claude-code.js';
 import { CLAUDE_CODE_TOOLS } from '../tools/definitions.js';
 import { executeTool, type ExecutorContext } from '../tools/executor.js';
-import type { Diagnosis, Patch } from '../types/task.js';
+import type { Diagnosis, Patch, PatchFile } from '../types/task.js';
 import type { WorkerResult } from '../types/worker.js';
 import { loadSettings } from '../config/settings.js';
 
@@ -34,6 +36,9 @@ export async function runClaudeCodeWorker(
   const systemPrompt = buildClaudeCodePrompt({ repoName, branchName, description: issue, focusFiles });
   const messages: Anthropic.MessageParam[] = [{ role: 'user', content: issue }];
 
+  // Track files written by the worker so we can backfill patch content
+  const writtenFiles = new Map<string, string>(); // relative path -> content written
+
   try {
     let loopCount = 0;
     while (loopCount < settings.maxToolLoops) {
@@ -55,6 +60,12 @@ export async function runClaudeCodeWorker(
           .join('');
 
         const result = extractJson<ClaudeCodeOutput>(textContent);
+
+        // Backfill patch files: if the worker returned placeholder content
+        // but actually wrote the file via write_file, read the real content from disk
+        if (result.patch?.files) {
+          backfillPatchContent(result.patch.files, writtenFiles, ctx.worktreePath);
+        }
 
         ctx.audit.log(taskId, 'worker_completed', 'gateway', {
           workerType: 'claude-code',
@@ -81,6 +92,17 @@ export async function runClaudeCodeWorker(
         const toolResults: Anthropic.ToolResultBlockParam[] = [];
         for (const tool of toolBlocks) {
           onProgress?.(`Tool: ${tool.name}`);
+
+          // Track write_file calls
+          if (tool.name === 'write_file') {
+            const input = tool.input as Record<string, unknown>;
+            const filePath = input.path as string;
+            const content = input.content as string;
+            if (filePath && content) {
+              writtenFiles.set(filePath, content);
+            }
+          }
+
           const result = await executeTool(tool.name, tool.input as Record<string, unknown>, ctx);
           toolResults.push({
             type: 'tool_result',
@@ -115,4 +137,44 @@ function extractJson<T>(text: string): T {
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (jsonMatch) return JSON.parse(jsonMatch[0]);
   throw new Error('No JSON found in worker response');
+}
+
+/**
+ * Workers sometimes return placeholder text in patch.files[].after instead of
+ * the actual file content (e.g. "full content written above"). This function
+ * backfills from two sources:
+ *   1. The content captured during write_file tool calls (writtenFiles map)
+ *   2. The actual file on disk in the worktree (fallback)
+ */
+function backfillPatchContent(
+  files: PatchFile[],
+  writtenFiles: Map<string, string>,
+  worktreePath: string,
+): void {
+  for (const file of files) {
+    if (file.action === 'delete') continue;
+
+    const isPlaceholder = !file.after ||
+      file.after.length < 100 ||
+      file.after.includes('full content written above') ||
+      file.after.includes('content written above') ||
+      file.after.includes('(full content');
+
+    if (isPlaceholder) {
+      // Try captured write_file content first
+      const captured = writtenFiles.get(file.path);
+      if (captured) {
+        file.after = captured;
+        continue;
+      }
+
+      // Fall back to reading from disk
+      try {
+        const fullPath = path.resolve(worktreePath, file.path);
+        file.after = readFileSync(fullPath, 'utf-8');
+      } catch {
+        // File doesn't exist on disk either — leave as-is
+      }
+    }
+  }
 }
