@@ -17,12 +17,12 @@ const SettingsSchema = z.object({
   models: z.object({
     claudeCode: z.string().default('claude-sonnet-4-6'),
     claudeCodeEscalation: z.string().default('claude-opus-4-6'),
-    coworkInvestigation: z.string().default('claude-haiku-4-5'),
+    coworkInvestigation: z.string().default('claude-sonnet-4-6'),
     coworkReview: z.string().default('claude-sonnet-4-6'),
   }).default({
     claudeCode: 'claude-sonnet-4-6',
     claudeCodeEscalation: 'claude-opus-4-6',
-    coworkInvestigation: 'claude-haiku-4-5',
+    coworkInvestigation: 'claude-sonnet-4-6',
     coworkReview: 'claude-sonnet-4-6',
   }),
 });
