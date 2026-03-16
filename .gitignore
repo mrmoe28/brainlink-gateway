@@ -3,5 +3,10 @@ dist/
 .env
 logs/
 data/tasks/
+data/browser-profile/
+data/tools/
+data/sync.json
 .worktrees/
+.playwright-mcp/
 *.tsbuildinfo
+*.png

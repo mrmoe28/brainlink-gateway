@@ -1,14 +1,14 @@
 {
   "solar-service-os": {
     "path": "C:/Users/Dell/Desktop/Solar Service OS",
-    "defaultBranch": "main",
+    "defaultBranch": "master",
     "allowedCommands": ["npm test", "npm run lint", "npm run build", "npx tsc --noEmit"],
     "blockedPaths": [".env", ".env.local", "*.pem", "*.key"],
     "maxWorktrees": 3
   },
   "modex": {
     "path": "C:/Users/Dell/Desktop/modex",
-    "defaultBranch": "master",
+    "defaultBranch": "main",
     "allowedCommands": ["npm test", "npm run lint", "npm run build"],
     "blockedPaths": [".env", "desktop/scripts/*.key"],
     "maxWorktrees": 2

@@ -9,6 +9,8 @@ import { TaskStore } from './approval/queue.js';
 import { createRouter } from './api/router.js';
 import { setupWebSocket, broadcast } from './api/websocket.js';
 import { requestId, errorHandler } from './api/middleware.js';
+import { browseRouter } from './browse/router.js';
+import { executeRouter } from './execute/router.js';
 
 // Load env
 import { config as dotenvConfig } from 'dotenv';
@@ -27,8 +29,118 @@ const taskStore = new TaskStore('data/tasks');
 
 // Express app
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '20mb' }));
 app.use(requestId);
+
+// Serve desktop web UI (public, no auth)
+app.use(express.static(path.resolve(import.meta.dirname ?? process.cwd(), '../public')));
+
+// Desktop web UI config (no auth needed — same machine)
+app.get('/api/config', (_req, res) => {
+  res.json({ gatewayKey: settings.gatewaySecret });
+});
+
+// Proxy Claude API calls so desktop UI doesn't need the API key
+app.post('/api/chat', express.json({ limit: '20mb' }), async (req, res) => {
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': settings.anthropicApiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(req.body),
+    });
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
+  }
+});
+
+// Synced settings (shared between mobile + desktop)
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+
+const SYNC_FILE = path.resolve(import.meta.dirname ?? process.cwd(), '../data/sync.json');
+
+async function loadSync(): Promise<any> {
+  try { return JSON.parse(await readFile(SYNC_FILE, 'utf-8')); }
+  catch { return { logins: [], rules: [], settings: {} }; }
+}
+
+async function saveSync(data: any): Promise<void> {
+  await mkdir(path.dirname(SYNC_FILE), { recursive: true });
+  await writeFile(SYNC_FILE, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+app.get('/api/sync', async (_req, res) => {
+  res.json(await loadSync());
+});
+
+app.post('/api/sync', express.json(), async (req, res) => {
+  const current = await loadSync();
+  const updated = { ...current, ...req.body };
+  await saveSync(updated);
+  res.json(updated);
+});
+
+app.patch('/api/sync', express.json(), async (req, res) => {
+  const current = await loadSync();
+  // Merge specific keys
+  if (req.body.logins) current.logins = req.body.logins;
+  if (req.body.rules) current.rules = req.body.rules;
+  if (req.body.settings) current.settings = { ...current.settings, ...req.body.settings };
+  await saveSync(current);
+  res.json(current);
+});
+
+// Brain (Supabase + Ollama) proxy endpoints
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
+const OLLAMA_URL = process.env.OLLAMA_URL || 'https://ollama.lock28.com';
+
+app.post('/api/brain/search', express.json(), async (req, res) => {
+  try {
+    const { query } = req.body;
+    // Get embedding from Ollama
+    const embedRes = await fetch(`${OLLAMA_URL}/api/embed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'nomic-embed-text', input: query }),
+    });
+    const embedData = await embedRes.json() as any;
+    const embedding = embedData.embeddings?.[0];
+    if (!embedding) { res.json({ results: 'Embedding failed.' }); return; }
+
+    // Search Supabase
+    const searchRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/search_thoughts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` },
+      body: JSON.stringify({ query_embedding: embedding, match_count: 5, similarity_threshold: 0.3 }),
+    });
+    const results = await searchRes.json() as any[];
+    if (!results || results.length === 0) { res.json({ results: 'No matching thoughts found.' }); return; }
+    const text = results.map((r: any) => `[${r.thought_type || 'note'}] ${r.content}`).join('\n');
+    res.json({ results: text });
+  } catch (err) {
+    res.json({ results: 'Brain search error: ' + (err instanceof Error ? err.message : String(err)) });
+  }
+});
+
+app.post('/api/brain/capture', express.json(), async (req, res) => {
+  try {
+    const { content, thought_type } = req.body;
+    const captureRes = await fetch(`${SUPABASE_URL}/functions/v1/capture`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_KEY}` },
+      body: JSON.stringify({ content, thought_type, source: 'brain-link-desktop' }),
+    });
+    res.json({ ok: captureRes.ok });
+  } catch (err) {
+    res.json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
 
 // Health endpoint is public
 app.get('/api/health', (_req, res) => {
@@ -43,6 +155,8 @@ app.get('/api/health', (_req, res) => {
 
 // Protected routes
 app.use(authMiddleware(settings.gatewaySecret));
+app.use('/api/browse', browseRouter);
+app.use('/api/execute', executeRouter);
 app.use(createRouter(taskStore, repoRegistry, audit, broadcast, startTime));
 
 // Error handler (must be last)
