@@ -16,6 +16,10 @@ const TaskRequestSchema = z.object({
   description: z.string().min(1),
   files: z.array(z.string()).optional(),
   branch: z.string().optional(),
+  doneWhen: z.array(z.string().min(1)).optional(),
+  constraints: z.array(z.string().min(1)).optional(),
+  outputFormat: z.string().min(1).optional(),
+  acceptanceCommands: z.array(z.string().min(1)).optional(),
   priority: z.enum(['normal', 'urgent']).default('normal'),
 });
 

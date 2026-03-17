@@ -5,6 +5,7 @@ import { execCommandTool } from '../tools/shell-ops.js';
 import type { ValidationResult } from '../types/task.js';
 import type { RepoConfig } from '../config/repos.js';
 import type { AuditLogger } from '../audit/logger.js';
+import { validateCommand } from '../security/command-guard.js';
 
 export async function runValidation(
   worktreePath: string,
@@ -12,6 +13,7 @@ export async function runValidation(
   audit: AuditLogger,
   taskId: string,
   patchModifiedPackageJson: boolean = false,
+  acceptanceCommands: string[] = [],
 ): Promise<ValidationResult> {
   audit.log(taskId, 'validation_started', 'gateway', { worktreePath });
 
@@ -29,6 +31,7 @@ export async function runValidation(
     build: null,
     typecheck: null,
     diffReview: null,
+    acceptanceChecks: [],
     overallPass: true,
   };
 
@@ -88,9 +91,30 @@ export async function runValidation(
     if (!r.success) result.overallPass = false;
   }
 
+  for (const command of acceptanceCommands) {
+    try {
+      validateCommand(command, repoConfig.allowedCommands);
+      const r = await execCommandTool(command, worktreePath, 120000);
+      result.acceptanceChecks.push({
+        command,
+        success: r.success,
+        output: r.output.slice(-3000),
+      });
+      if (!r.success) result.overallPass = false;
+    } catch (err) {
+      result.acceptanceChecks.push({
+        command,
+        success: false,
+        output: err instanceof Error ? err.message : String(err),
+      });
+      result.overallPass = false;
+    }
+  }
+
   audit.log(taskId, 'validation_completed', 'gateway', {
     overallPass: result.overallPass,
     tests: result.tests ? { passed: result.tests.passed, failed: result.tests.failed } : null,
+    acceptanceChecks: result.acceptanceChecks.map(check => ({ command: check.command, success: check.success })),
   });
 
   return result;

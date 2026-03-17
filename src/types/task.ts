@@ -18,6 +18,10 @@ export interface TaskRequest {
   description: string;
   files?: string[];
   branch?: string;
+  doneWhen?: string[];
+  constraints?: string[];
+  outputFormat?: string;
+  acceptanceCommands?: string[];
   priority: 'normal' | 'urgent';
 }
 
@@ -87,6 +91,11 @@ export interface ValidationResult {
     concerns: DiffConcern[];
     suggestions: string[];
   } | null;
+  acceptanceChecks: Array<{
+    command: string;
+    success: boolean;
+    output: string;
+  }>;
   overallPass: boolean;
 }
 

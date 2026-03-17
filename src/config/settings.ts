@@ -9,6 +9,7 @@ const SettingsSchema = z.object({
   port: z.number().default(7400),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   workerTimeoutMs: z.number().default(180000),
+  workerIdleTimeoutMs: z.number().default(90000),
   commandTimeoutMs: z.number().default(30000),
   maxToolLoops: z.number().default(40),
   maxFileReadLines: z.number().default(500),
@@ -44,6 +45,7 @@ export function loadSettings(): Settings {
     reposBaseDir: process.env.REPOS_BASE_DIR,
     port: process.env.GATEWAY_PORT ? parseInt(process.env.GATEWAY_PORT) : undefined,
     logLevel: process.env.LOG_LEVEL,
+    workerIdleTimeoutMs: process.env.WORKER_IDLE_TIMEOUT_MS ? parseInt(process.env.WORKER_IDLE_TIMEOUT_MS) : undefined,
   });
   return cachedSettings;
 }

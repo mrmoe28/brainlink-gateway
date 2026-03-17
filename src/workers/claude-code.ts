@@ -7,6 +7,7 @@ import { executeTool, type ExecutorContext } from '../tools/executor.js';
 import type { Diagnosis, Patch, PatchFile } from '../types/task.js';
 import type { WorkerResult } from '../types/worker.js';
 import { loadSettings } from '../config/settings.js';
+import type { TaskRequest } from '../types/task.js';
 
 interface ClaudeCodeOutput {
   diagnosis: Diagnosis;
@@ -17,10 +18,8 @@ interface ClaudeCodeOutput {
 export async function runClaudeCodeWorker(
   taskId: string,
   ctx: ExecutorContext,
-  issue: string,
-  repoName: string,
+  request: TaskRequest,
   branchName: string,
-  focusFiles: string[],
   onProgress?: (msg: string) => void,
 ): Promise<WorkerResult> {
   const settings = loadSettings();
@@ -33,23 +32,45 @@ export async function runClaudeCodeWorker(
     model: settings.models.claudeCode,
   });
 
-  const systemPrompt = buildClaudeCodePrompt({ repoName, branchName, description: issue, focusFiles });
-  const messages: Anthropic.MessageParam[] = [{ role: 'user', content: issue }];
+  const systemPrompt = buildClaudeCodePrompt({
+    taskType: request.type,
+    repoName: request.repo,
+    branchName,
+    description: request.description,
+    focusFiles: request.files || [],
+    doneWhen: request.doneWhen,
+    constraints: request.constraints,
+    outputFormat: request.outputFormat,
+    acceptanceCommands: request.acceptanceCommands,
+  });
+  const messages: Anthropic.MessageParam[] = [{ role: 'user', content: request.description }];
 
   // Track files written by the worker so we can backfill patch content
   const writtenFiles = new Map<string, string>(); // relative path -> content written
+  const focusFiles = new Set((request.files || []).map(normalizePath));
+  const metadata = {
+    toolsUsed: new Set<string>(),
+    filesRead: new Set<string>(),
+    filesWritten: new Set<string>(),
+    commandsRun: new Set<string>(),
+    focusedFilesTouched: new Set<string>(),
+    toolCallCount: 0,
+  };
 
   try {
     let loopCount = 0;
     while (loopCount < settings.maxToolLoops) {
       loopCount++;
-      const response = await client.messages.create({
-        model: settings.models.claudeCode,
-        max_tokens: 4096,
-        system: systemPrompt,
-        tools: CLAUDE_CODE_TOOLS as Anthropic.Tool[],
-        messages,
-      });
+      const response = await withIdleTimeout(
+        client.messages.create({
+          model: settings.models.claudeCode,
+          max_tokens: 4096,
+          system: systemPrompt,
+          tools: CLAUDE_CODE_TOOLS as Anthropic.Tool[],
+          messages,
+        }),
+        settings.workerIdleTimeoutMs,
+      );
 
       totalTokens += (response.usage?.input_tokens ?? 0) + (response.usage?.output_tokens ?? 0);
 
@@ -81,6 +102,7 @@ export async function runClaudeCodeWorker(
           result,
           tokensUsed: totalTokens,
           durationMs: Date.now() - startTime,
+          metadata: serializeMetadata(metadata),
         };
       }
 
@@ -92,6 +114,7 @@ export async function runClaudeCodeWorker(
         const toolResults: Anthropic.ToolResultBlockParam[] = [];
         for (const tool of toolBlocks) {
           onProgress?.(`Tool: ${tool.name}`);
+          recordToolUsage(metadata, focusFiles, tool.name, tool.input as Record<string, unknown>);
 
           // Track write_file calls
           if (tool.name === 'write_file') {
@@ -127,8 +150,74 @@ export async function runClaudeCodeWorker(
       tokensUsed: totalTokens,
       durationMs: Date.now() - startTime,
       error,
+      metadata: serializeMetadata(metadata),
     };
   }
+}
+
+function withIdleTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => reject(new Error(`Worker idle timeout after ${timeoutMs}ms without progress`)), timeoutMs);
+    }),
+  ]);
+}
+
+function normalizePath(filePath: string): string {
+  return filePath.replace(/\\/g, '/').replace(/^\.\/+/, '');
+}
+
+function recordToolUsage(
+  metadata: {
+    toolsUsed: Set<string>;
+    filesRead: Set<string>;
+    filesWritten: Set<string>;
+    commandsRun: Set<string>;
+    focusedFilesTouched: Set<string>;
+    toolCallCount: number;
+  },
+  focusFiles: Set<string>,
+  toolName: string,
+  input: Record<string, unknown>,
+): void {
+  metadata.toolsUsed.add(toolName);
+  metadata.toolCallCount += 1;
+
+  const touchPath = (value: unknown, target: Set<string>) => {
+    if (typeof value !== 'string' || !value.trim()) return;
+    const normalized = normalizePath(value);
+    target.add(normalized);
+    if (focusFiles.has(normalized)) metadata.focusedFilesTouched.add(normalized);
+  };
+
+  if (toolName === 'read_file' || toolName === 'git_blame' || toolName === 'git_log') {
+    touchPath(input.path, metadata.filesRead);
+  } else if (toolName === 'search_content') {
+    touchPath(input.path, metadata.filesRead);
+  } else if (toolName === 'write_file') {
+    touchPath(input.path, metadata.filesWritten);
+  } else if (toolName === 'run_command' && typeof input.command === 'string') {
+    metadata.commandsRun.add(input.command);
+  }
+}
+
+function serializeMetadata(metadata: {
+  toolsUsed: Set<string>;
+  filesRead: Set<string>;
+  filesWritten: Set<string>;
+  commandsRun: Set<string>;
+  focusedFilesTouched: Set<string>;
+  toolCallCount: number;
+}) {
+  return {
+    toolsUsed: [...metadata.toolsUsed],
+    filesRead: [...metadata.filesRead],
+    filesWritten: [...metadata.filesWritten],
+    commandsRun: [...metadata.commandsRun],
+    focusedFilesTouched: [...metadata.focusedFilesTouched],
+    toolCallCount: metadata.toolCallCount,
+  };
 }
 
 function extractJson<T>(text: string): T {

@@ -17,6 +17,14 @@ export interface WorkerResult {
   tokensUsed: number;
   durationMs: number;
   error?: string;
+  metadata?: {
+    toolsUsed: string[];
+    filesRead: string[];
+    filesWritten: string[];
+    commandsRun: string[];
+    focusedFilesTouched: string[];
+    toolCallCount: number;
+  };
 }
 
 export interface ToolDefinition {

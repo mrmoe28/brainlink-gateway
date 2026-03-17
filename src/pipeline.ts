@@ -2,13 +2,14 @@ import type { RepoConfig } from './config/repos.js';
 import { loadSettings } from './config/settings.js';
 import type { TaskStore } from './approval/queue.js';
 import type { AuditLogger } from './audit/logger.js';
-import type { TaskRequest } from './types/task.js';
+import type { TaskRequest, ValidationResult } from './types/task.js';
 import type { ExecutorContext } from './tools/executor.js';
 import { runClaudeCodeWorker } from './workers/claude-code.js';
 import { dispatchInvestigationWorkers, dispatchValidationWorkers } from './workers/cowork-dispatch.js';
 import { synthesizeResults } from './workers/synthesis.js';
 import { runValidation } from './validation/runner.js';
 import { applyPatch } from './approval/actions.js';
+import type { WorkerResult } from './types/worker.js';
 
 export async function runTaskPipeline(
   taskId: string,
@@ -39,8 +40,7 @@ export async function runTaskPipeline(
     // Run Claude Code and Cowork workers in parallel
     const [claudeCodeResult, coworkResults] = await Promise.all([
       runClaudeCodeWorker(
-        taskId, ctx, request.description, request.repo,
-        state.worktreeBranch, request.files || [],
+        taskId, ctx, request, state.worktreeBranch,
         (msg) => broadcast(taskId, { type: 'progress', taskId, phase: 'investigating', worker: 'claude-code', message: msg }),
       ),
       dispatchInvestigationWorkers(
@@ -79,12 +79,21 @@ export async function runTaskPipeline(
       audit.log(taskId, 'patch_applied', 'gateway', { files: ccResult.patch.files.length });
     }
 
+    enforceClaudeWorkerResult(taskId, request, claudeCodeResult, ccResult);
+
     // Phase 3: Validation
     taskStore.transition(taskId, 'validating');
     broadcast(taskId, { type: 'progress', taskId, phase: 'validating', message: 'Running tests and validation...' });
 
     const patchModifiedPkg = ccResult?.patch?.files?.some((f: any) => f.path === 'package.json' || f.path === 'package-lock.json') || false;
-    const validation = await runValidation(state.worktreePath, repoConfig, audit, taskId, patchModifiedPkg);
+    const validation = await runValidation(
+      state.worktreePath,
+      repoConfig,
+      audit,
+      taskId,
+      patchModifiedPkg,
+      request.acceptanceCommands || [],
+    );
 
     // Run validation workers if patch exists
     if (ccResult?.patch) {
@@ -117,6 +126,7 @@ export async function runTaskPipeline(
     }
 
     taskStore.update(taskId, { validation });
+    enforceValidationResult(request, validation);
     broadcast(taskId, { type: 'validation_complete', taskId, passed: validation.overallPass });
 
     // Phase 4: Awaiting Approval
@@ -156,6 +166,7 @@ export async function runTaskPipeline(
           tests: updatedState.validation?.tests ? { passed: updatedState.validation.tests.passed, failed: updatedState.validation.tests.failed } : null,
           lint: updatedState.validation?.lint ? { errors: updatedState.validation.lint.errors, warnings: updatedState.validation.lint.warnings } : null,
           build: updatedState.validation?.build ? { success: updatedState.validation.build.success } : null,
+          acceptanceChecks: updatedState.validation?.acceptanceChecks || [],
           diffReview: updatedState.validation?.diffReview,
           overallPass: updatedState.validation?.overallPass,
         },
@@ -174,4 +185,60 @@ export async function runTaskPipeline(
     } catch {}
     broadcast(taskId, { type: 'task_failed', taskId, error });
   }
+}
+
+function enforceClaudeWorkerResult(
+  taskId: string,
+  request: TaskRequest,
+  worker: WorkerResult,
+  result: any,
+): void {
+  if (worker.status !== 'completed' || !result) {
+    throw new Error(`Claude worker did not complete usable work for ${taskId}`);
+  }
+
+  const diagnosis = result.diagnosis;
+  if (!diagnosis?.summary || !diagnosis?.rootCause) {
+    throw new Error('Claude worker returned an incomplete diagnosis');
+  }
+  if (!Array.isArray(diagnosis.evidence) || diagnosis.evidence.length === 0) {
+    throw new Error('Claude worker returned no concrete evidence');
+  }
+
+  const metadata = worker.metadata;
+  if (!metadata || metadata.toolCallCount === 0) {
+    throw new Error('Claude worker made no tool calls');
+  }
+  if (metadata.filesRead.length === 0 && metadata.commandsRun.length === 0) {
+    throw new Error('Claude worker produced no inspection evidence');
+  }
+
+  const requestedFiles = (request.files || []).map(normalizePath);
+  const touchedFiles = new Set(metadata.focusedFilesTouched.map(normalizePath));
+  const missingFocusedFiles = requestedFiles.filter(file => !touchedFiles.has(file));
+  if (missingFocusedFiles.length > 0) {
+    throw new Error(`Claude worker did not inspect required files: ${missingFocusedFiles.join(', ')}`);
+  }
+
+  const patchFiles = Array.isArray(result.patch?.files) ? result.patch.files : [];
+  if (request.type === 'fix' && patchFiles.length === 0) {
+    throw new Error('Fix task produced no code changes');
+  }
+}
+
+function enforceValidationResult(request: TaskRequest, validation: ValidationResult): void {
+  if (!validation.overallPass) {
+    throw new Error('Validation failed');
+  }
+
+  if ((request.acceptanceCommands || []).length > 0) {
+    const failed = validation.acceptanceChecks.filter(check => !check.success);
+    if (failed.length > 0) {
+      throw new Error(`Acceptance checks failed: ${failed.map(check => check.command).join(', ')}`);
+    }
+  }
+}
+
+function normalizePath(filePath: string): string {
+  return filePath.replace(/\\/g, '/').replace(/^\.\/+/, '');
 }
