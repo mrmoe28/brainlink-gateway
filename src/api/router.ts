@@ -6,10 +6,13 @@ import { removeWorktree, listWorktrees } from '../workspace/worktree.js';
 import type { RepoRegistry } from '../config/repos.js';
 import type { AuditLogger } from '../audit/logger.js';
 import { runTaskPipeline } from '../pipeline.js';
+import { loadSettings } from '../config/settings.js';
+import { hasGithubAuth, resolveRepoSource } from '../workspace/repo-source.js';
 
 const TaskRequestSchema = z.object({
   type: z.enum(['diagnose', 'fix', 'investigate', 'test', 'review']),
   repo: z.string().min(1),
+  repoUrl: z.string().url().optional(),
   description: z.string().min(1),
   files: z.array(z.string()).optional(),
   branch: z.string().optional(),
@@ -29,16 +32,15 @@ export function createRouter(
   startTime: number,
 ): Router {
   const router = Router();
+  const settings = loadSettings();
 
   // POST /api/tasks
   router.post('/api/tasks', async (req, res) => {
     try {
       const body = TaskRequestSchema.parse(req.body);
-      const repoConfig = repoRegistry[body.repo];
-      if (!repoConfig) {
-        res.status(400).json({ error: `Unknown repo: ${body.repo}` });
-        return;
-      }
+      const repoSource = resolveRepoSource(repoRegistry, { repo: body.repo, repoUrl: body.repoUrl, branch: body.branch }, settings);
+      const repoConfig = repoSource.repoConfig;
+      repoRegistry[repoSource.repoKey] = repoConfig;
 
       // Import dynamically to avoid circular deps
       const { generateTaskId } = await import('../workspace/branch.js');
@@ -49,10 +51,16 @@ export function createRouter(
       const worktreeInfo = createWorktree(repoConfig.path, taskId, body.description, sourceBranch, audit, repoConfig.maxWorktrees);
 
       const taskState = taskStore.create(taskId, body, worktreeInfo.path, worktreeInfo.branch);
-      audit.log(taskId, 'task_created', 'gateway', { repo: body.repo, type: body.type });
+      taskStore.update(taskId, { repo: repoSource.repoKey, repoUrl: repoSource.repoUrl });
+      audit.log(taskId, 'task_created', 'gateway', {
+        repo: repoSource.repoKey,
+        repoUrl: repoSource.repoUrl,
+        type: body.type,
+        cloned: repoSource.cloned,
+      });
 
       // Start pipeline async (don't await)
-      runTaskPipeline(taskId, body, taskStore, repoConfig, audit, broadcast).catch(err => {
+      runTaskPipeline(taskId, { ...body, repo: repoSource.repoKey }, taskStore, repoConfig, audit, broadcast).catch(err => {
         console.error(`Pipeline error for ${taskId}:`, err);
         try { taskStore.transition(taskId, 'failed'); } catch {}
       });
@@ -62,6 +70,8 @@ export function createRouter(
         status: taskState.status,
         worktreeBranch: worktreeInfo.branch,
         createdAt: taskState.createdAt,
+        repo: repoSource.repoKey,
+        repoUrl: repoSource.repoUrl,
       });
     } catch (err) {
       if (err instanceof z.ZodError) {
@@ -194,7 +204,13 @@ export function createRouter(
       defaultBranch: config.defaultBranch,
       activeWorktrees: listWorktrees(config.path).length,
     }));
-    res.json({ repos });
+    res.json({
+      repos,
+      dynamic: {
+        defaultOwner: settings.githubDefaultOwner,
+        reposBaseDir: settings.reposBaseDir,
+      },
+    });
   });
 
   // GET /api/health
@@ -205,6 +221,10 @@ export function createRouter(
       uptime: Math.floor((Date.now() - startTime) / 1000),
       activeWorktrees: allTasks.filter(t => ['investigating', 'synthesizing', 'validating', 'awaiting_approval'].includes(t.status)).length,
       pendingApprovals: allTasks.filter(t => t.status === 'awaiting_approval').length,
+      githubAuth: {
+        configured: hasGithubAuth(settings),
+        defaultOwner: settings.githubDefaultOwner,
+      },
     });
   });
 

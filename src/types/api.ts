@@ -3,6 +3,8 @@ export interface CreateTaskResponse {
   status: string;
   worktreeBranch: string;
   createdAt: string;
+  repo?: string;
+  repoUrl?: string;
 }
 
 export interface ApproveRequest {
@@ -15,6 +17,10 @@ export interface HealthResponse {
   uptime: number;
   activeWorktrees: number;
   pendingApprovals: number;
+  githubAuth?: {
+    configured: boolean;
+    defaultOwner: string;
+  };
 }
 
 export interface WSMessage {

@@ -11,6 +11,7 @@ import { setupWebSocket, broadcast } from './api/websocket.js';
 import { requestId, errorHandler } from './api/middleware.js';
 import { browseRouter } from './browse/router.js';
 import { executeRouter } from './execute/router.js';
+import { hasGithubAuth } from './workspace/repo-source.js';
 
 // Load env
 import { config as dotenvConfig } from 'dotenv';
@@ -150,6 +151,10 @@ app.get('/api/health', (_req, res) => {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     activeWorktrees: allTasks.filter(t => ['investigating', 'synthesizing', 'validating', 'awaiting_approval'].includes(t.status)).length,
     pendingApprovals: allTasks.filter(t => t.status === 'awaiting_approval').length,
+    githubAuth: {
+      configured: hasGithubAuth(settings),
+      defaultOwner: settings.githubDefaultOwner,
+    },
   });
 });
 
@@ -214,6 +219,8 @@ for (const task of recoveredTasks) {
 server.listen(settings.port, () => {
   console.log(`Brain Link Local Agent Gateway running on port ${settings.port}`);
   console.log(`Repos: ${Object.keys(repoRegistry).join(', ')}`);
+  console.log(`GitHub default owner: ${settings.githubDefaultOwner}`);
+  console.log(`Dynamic repo cache: ${settings.reposBaseDir}`);
   console.log(`Recovered ${recoveredTasks.length} stale tasks`);
 });
 

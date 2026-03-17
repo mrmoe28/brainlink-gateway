@@ -38,6 +38,7 @@ export class TaskStore {
       taskId,
       status: 'pending',
       repo: request.repo,
+      repoUrl: request.repoUrl,
       worktreePath,
       worktreeBranch,
       createdAt: now,

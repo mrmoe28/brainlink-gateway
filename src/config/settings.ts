@@ -3,6 +3,9 @@ import { z } from 'zod';
 const SettingsSchema = z.object({
   anthropicApiKey: z.string().min(1),
   gatewaySecret: z.string().min(8),
+  githubToken: z.string().optional().default(''),
+  githubDefaultOwner: z.string().min(1).default('mrmoe28'),
+  reposBaseDir: z.string().min(1).default('data/repos'),
   port: z.number().default(7400),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   workerTimeoutMs: z.number().default(180000),
@@ -36,6 +39,9 @@ export function loadSettings(): Settings {
   cachedSettings = SettingsSchema.parse({
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
     gatewaySecret: process.env.GATEWAY_SECRET,
+    githubToken: process.env.GITHUB_TOKEN,
+    githubDefaultOwner: process.env.GITHUB_DEFAULT_OWNER,
+    reposBaseDir: process.env.REPOS_BASE_DIR,
     port: process.env.GATEWAY_PORT ? parseInt(process.env.GATEWAY_PORT) : undefined,
     logLevel: process.env.LOG_LEVEL,
   });

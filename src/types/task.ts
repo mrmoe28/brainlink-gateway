@@ -14,6 +14,7 @@ export type TaskStatus =
 export interface TaskRequest {
   type: 'diagnose' | 'fix' | 'investigate' | 'test' | 'review';
   repo: string;
+  repoUrl?: string;
   description: string;
   files?: string[];
   branch?: string;
@@ -158,6 +159,7 @@ export interface TaskState {
   taskId: string;
   status: TaskStatus;
   repo: string;
+  repoUrl?: string;
   worktreePath: string;
   worktreeBranch: string;
   createdAt: string;
