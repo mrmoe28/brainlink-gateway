@@ -62,7 +62,7 @@ function parseRepoSource(input: RequestedRepoSource, settings: Settings): { repo
 }
 
 function getRepoClonePath(baseDir: string, repoFullName: string): string {
-  return path.join(baseDir, repoFullName.replace(/[\\/]/g, '__'));
+  return path.resolve(baseDir, repoFullName.replace(/[\\/]/g, '__'));
 }
 
 export function ensureGithubAuth(settings: Settings): void {

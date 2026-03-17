@@ -24,7 +24,7 @@ export function validatePath(
   worktreePath?: string,
 ): string {
   const basePath = worktreePath ?? repoConfig.path;
-  const normalizedBase = basePath.replace(/\\/g, '/');
+  const normalizedBase = path.resolve(basePath).replace(/\\/g, '/');
   const resolved = path.resolve(basePath, requestedPath).replace(/\\/g, '/');
 
   // Must be within repo/worktree
