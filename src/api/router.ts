@@ -9,6 +9,55 @@ import { runTaskPipeline } from '../pipeline.js';
 import { loadSettings } from '../config/settings.js';
 import { hasGithubAuth, resolveRepoSource } from '../workspace/repo-source.js';
 
+const ModexTaskRequestSchema = z.object({
+  repo: z.string().min(1),
+  taskType: z.enum(['diagnose', 'fix', 'review', 'build', 'test']).optional(),
+  type: z.enum(['diagnose', 'fix', 'investigate', 'test', 'review']).optional(),
+  prompt: z.string().min(1).optional(),
+  description: z.string().min(1).optional(),
+  files: z.array(z.string()).optional(),
+  conversationId: z.string().nullable().optional(),
+  source: z.string().min(1).optional(),
+  provider: z.enum(['openai', 'lmstudio', 'ollama', 'llama-rpc']).optional(),
+  model: z.string().min(1).optional(),
+  requestedActions: z.array(z.string()).optional(),
+});
+
+const ModexDecisionSchema = z.object({
+  notes: z.string().optional(),
+  requestedActions: z.array(z.string()).optional(),
+});
+
+function normalizeModexTaskType(value?: string): 'diagnose' | 'fix' | 'review' | 'build' | 'test' {
+  if (!value) return 'fix';
+  if (value === 'investigate') return 'diagnose';
+  if (value === 'diagnose' || value === 'fix' || value === 'review' || value === 'build' || value === 'test') return value;
+  return 'fix';
+}
+
+async function proxyModex(settings: ReturnType<typeof loadSettings>, pathname: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers || {});
+  headers.set('Content-Type', 'application/json');
+  if (settings.modexBridgeToken) {
+    headers.set('Authorization', 'Bearer ' + settings.modexBridgeToken);
+  }
+  const response = await fetch(settings.modexBridgeUrl + pathname, {
+    ...init,
+    headers,
+  });
+  const text = await response.text();
+  const body = text
+    ? (() => {
+        try {
+          return JSON.parse(text);
+        } catch {
+          return { error: text };
+        }
+      })()
+    : null;
+  return { response, body };
+}
+
 const TaskRequestSchema = z.object({
   type: z.enum(['diagnose', 'fix', 'investigate', 'test', 'review']),
   repo: z.string().min(1),
@@ -196,6 +245,91 @@ export function createRouter(
         res.json({ taskId: req.params.id, status: 'rolled_back', rollbackMethod: 'worktree_discard' });
       }
     } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
+    }
+  });
+
+  // POST /api/modex/tasks
+  router.post('/api/modex/tasks', async (req, res) => {
+    try {
+      const body = ModexTaskRequestSchema.parse(req.body);
+      const payload = {
+        repo: body.repo,
+        taskType: normalizeModexTaskType(body.taskType || body.type),
+        prompt: body.prompt || body.description,
+        files: body.files,
+        conversationId: body.conversationId,
+        source: body.source || 'brain-link-gateway',
+        provider: body.provider,
+        model: body.model,
+        requestedActions: body.requestedActions,
+      };
+      const { response, body: result } = await proxyModex(settings, '/api/bridge/tasks', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      res.status(response.status).json(result);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ error: 'Validation error', details: err.issues });
+        return;
+      }
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
+    }
+  });
+
+  // GET /api/modex/tasks/:id
+  router.get('/api/modex/tasks/:id', async (req, res) => {
+    try {
+      const { response, body } = await proxyModex(settings, '/api/bridge/tasks/' + encodeURIComponent(req.params.id), {
+        method: 'GET',
+      });
+      res.status(response.status).json(body);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
+    }
+  });
+
+  // POST /api/modex/tasks/:id/approve
+  router.post('/api/modex/tasks/:id/approve', async (req, res) => {
+    try {
+      const body = ModexDecisionSchema.parse(req.body || {});
+      const { response, body: result } = await proxyModex(
+        settings,
+        '/api/bridge/tasks/' + encodeURIComponent(req.params.id) + '/approve',
+        {
+          method: 'POST',
+          body: JSON.stringify(body),
+        }
+      );
+      res.status(response.status).json(result);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ error: 'Validation error', details: err.issues });
+        return;
+      }
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
+    }
+  });
+
+  // POST /api/modex/tasks/:id/reject
+  router.post('/api/modex/tasks/:id/reject', async (req, res) => {
+    try {
+      const body = ModexDecisionSchema.parse(req.body || {});
+      const { response, body: result } = await proxyModex(
+        settings,
+        '/api/bridge/tasks/' + encodeURIComponent(req.params.id) + '/reject',
+        {
+          method: 'POST',
+          body: JSON.stringify(body),
+        }
+      );
+      res.status(response.status).json(result);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ error: 'Validation error', details: err.issues });
+        return;
+      }
       res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
     }
   });

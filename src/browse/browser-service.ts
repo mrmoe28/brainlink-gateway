@@ -1,27 +1,90 @@
-import { chromium, BrowserContext, Page } from 'playwright';
+import { chromium, BrowserContext, Browser, Page } from 'playwright';
+import { spawn } from 'node:child_process';
+import { accessSync } from 'node:fs';
 import path from 'node:path';
 import pino from 'pino';
 
 const log = pino({ name: 'browser-service' });
 
-const USER_DATA_DIR = path.resolve(process.cwd(), 'data/browser-profile');
+const CDP_PORT = parseInt(process.env.CHROME_DEBUG_PORT || '9222');
+const CDP_URL = `http://127.0.0.1:${CDP_PORT}`;
 
+// Real Chrome user data dir (Windows default, overridable via env)
+const USER_DATA_DIR = process.env.CHROME_USER_DATA
+  || path.join(process.env.LOCALAPPDATA || process.env.HOME || '', 'Google/Chrome/User Data');
+
+// Common Chrome paths on Windows
+const CHROME_PATHS = [
+  path.join(process.env.PROGRAMFILES || '', 'Google/Chrome/Application/chrome.exe'),
+  path.join(process.env['PROGRAMFILES(X86)'] || '', 'Google/Chrome/Application/chrome.exe'),
+  path.join(process.env.LOCALAPPDATA || '', 'Google/Chrome/Application/chrome.exe'),
+];
+
+let browser: Browser | null = null;
 let context: BrowserContext | null = null;
 let page: Page | null = null;
 
-async function launchContext(): Promise<BrowserContext> {
-  log.info('Launching persistent browser...');
-  const ctx = await chromium.launchPersistentContext(USER_DATA_DIR, {
-    channel: 'chrome',
-    headless: false,
-    viewport: { width: 1280, height: 800 },
-    args: ['--start-maximized', '--disable-blink-features=AutomationControlled'],
-  });
-  const pages = ctx.pages();
-  if (pages.length > 0) {
-    page = pages[0];
+function findChromeExe(): string | null {
+  for (const p of CHROME_PATHS) {
+    try { accessSync(p); return p; } catch {}
   }
-  return ctx;
+  return null;
+}
+
+// Check if Chrome is already listening on the debug port
+async function isCdpAvailable(): Promise<boolean> {
+  try {
+    const res = await fetch(`${CDP_URL}/json/version`, { signal: AbortSignal.timeout(1500) });
+    return res.ok;
+  } catch { return false; }
+}
+
+// Launch Chrome with debugging enabled (reuses existing profile)
+async function ensureChromeWithDebugging(): Promise<void> {
+  if (await isCdpAvailable()) {
+    log.info('Chrome already running with CDP on port %d', CDP_PORT);
+    return;
+  }
+
+  log.info('Starting Chrome with remote debugging on port %d...', CDP_PORT);
+  const exe = findChromeExe();
+  if (!exe) throw new Error('Chrome not found. Install Google Chrome or set CHROME_USER_DATA.');
+
+  // Spawn Chrome detached so it outlives the gateway process
+  const child = spawn(exe, [
+    `--remote-debugging-port=${CDP_PORT}`,
+    `--user-data-dir=${USER_DATA_DIR}`,
+    '--disable-blink-features=AutomationControlled',
+    '--restore-last-session',
+  ], { detached: true, stdio: 'ignore' });
+  child.unref();
+
+  // Wait for CDP to become available (up to 10s)
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    if (await isCdpAvailable()) {
+      log.info('Chrome CDP ready');
+      return;
+    }
+  }
+  throw new Error('Chrome started but CDP not responding. Check if another Chrome instance is blocking the profile.');
+}
+
+async function connectToChrome(): Promise<BrowserContext> {
+  await ensureChromeWithDebugging();
+
+  log.info('Connecting to Chrome via CDP...');
+  browser = await chromium.connectOverCDP(CDP_URL);
+  const contexts = browser.contexts();
+  if (contexts.length > 0) {
+    // Use the first (default) context — this is your real Chrome session
+    const ctx = contexts[0];
+    const pages = ctx.pages();
+    if (pages.length > 0) page = pages[0];
+    return ctx;
+  }
+  // Fallback: create a new context (shouldn't normally happen)
+  return await browser.newContext({ viewport: { width: 1280, height: 800 } });
 }
 
 export async function getContext(): Promise<BrowserContext> {
@@ -31,21 +94,22 @@ export async function getContext(): Promise<BrowserContext> {
       // Quick health check — if browser was closed this throws
       context.pages();
     } catch {
-      log.warn('Browser context dead, relaunching...');
+      log.warn('Browser context dead, reconnecting...');
       context = null;
+      browser = null;
       page = null;
     }
   }
   if (!context) {
-    context = await launchContext();
+    context = await connectToChrome();
   }
   return context;
 }
 
 export async function restartBrowser(): Promise<void> {
   await closeBrowser();
-  context = await launchContext();
-  log.info('Browser restarted');
+  context = await connectToChrome();
+  log.info('Browser reconnected');
 }
 
 export async function getPage(): Promise<Page> {
@@ -269,9 +333,12 @@ export async function currentPage(): Promise<{ title: string; url: string }> {
 }
 
 export async function closeBrowser(): Promise<void> {
-  if (page && !page.isClosed()) await page.close().catch(() => {});
-  if (context) await context.close().catch(() => {});
+  // Disconnect from Chrome without killing it — user's browser stays open
   page = null;
   context = null;
-  log.info('Browser closed');
+  if (browser) {
+    await browser.close().catch(() => {});
+    browser = null;
+  }
+  log.info('Disconnected from Chrome (browser still running)');
 }

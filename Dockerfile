@@ -1,18 +1,15 @@
 FROM node:22-slim
 
-# Skip Playwright entirely in cloud mode
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 ENV PLAYWRIGHT_BROWSERS_PATH=0
 ENV NODE_ENV=production
 
 WORKDIR /app
 
-# Use npm instead of pnpm (simpler, no corepack issues)
 COPY package.json ./
 
-# Generate package-lock and install
-RUN npm install --ignore-scripts 2>/dev/null; \
-    npx playwright install-deps 2>/dev/null || true
+# Install all deps (including devDependencies for tsc)
+RUN NODE_ENV=development npm install --ignore-scripts
 
 # Copy source
 COPY tsconfig.json ./
@@ -20,8 +17,11 @@ COPY src/ src/
 COPY config/ config/
 COPY public/ public/
 
-# Build TypeScript
-RUN npx tsc
+# Build TypeScript using the locally installed tsc
+RUN ./node_modules/.bin/tsc
+
+# Prune devDependencies
+RUN npm prune --production
 
 # Create data directories
 RUN mkdir -p data/tasks data/uploads logs
