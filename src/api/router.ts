@@ -135,6 +135,13 @@ export function createRouter(
     }
   });
 
+  // GET /api/tasks
+  router.get('/api/tasks', (req, res) => {
+    const limit = Math.min(parseInt(String(req.query.limit ?? '50'), 10), 200);
+    const tasks = taskStore.list().slice(0, limit);
+    res.json({ tasks });
+  });
+
   // GET /api/tasks/:id
   router.get('/api/tasks/:id', (req, res) => {
     const state = taskStore.get(req.params.id);
