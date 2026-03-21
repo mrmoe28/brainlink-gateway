@@ -8,7 +8,6 @@ import type { AuditLogger } from '../audit/logger.js';
 import { runTaskPipeline } from '../pipeline.js';
 import { loadSettings } from '../config/settings.js';
 import { hasGithubAuth, resolveRepoSource } from '../workspace/repo-source.js';
-import { listRecordings, searchRecordings, getRecordingWithTranscript, getAllActionItems } from '../plaud/db.js';
 
 const ModexTaskRequestSchema = z.object({
   repo: z.string().min(1),
@@ -369,49 +368,6 @@ export function createRouter(
     });
   });
 
-  // GET /api/plaud/recordings?offset=0&limit=10
-  router.get('/api/plaud/recordings', (_req, res) => {
-    try {
-      const offset = parseInt(String(_req.query.offset ?? '0'), 10);
-      const limit = Math.min(parseInt(String(_req.query.limit ?? '10'), 10), 50);
-      res.json(listRecordings(offset, limit));
-    } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
-    }
-  });
-
-  // GET /api/plaud/search?q=...&limit=10
-  router.get('/api/plaud/search', (_req, res) => {
-    try {
-      const q = String(_req.query.q ?? '').trim();
-      if (!q) { res.status(400).json({ error: 'q is required' }); return; }
-      const limit = Math.min(parseInt(String(_req.query.limit ?? '10'), 10), 50);
-      res.json(searchRecordings(q, limit));
-    } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
-    }
-  });
-
-  // GET /api/plaud/recording/:id
-  router.get('/api/plaud/recording/:id', (_req, res) => {
-    try {
-      const id = parseInt(_req.params.id, 10);
-      const recording = getRecordingWithTranscript(id);
-      if (!recording) { res.status(404).json({ error: 'Recording not found' }); return; }
-      res.json(recording);
-    } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
-    }
-  });
-
-  // GET /api/plaud/action-items
-  router.get('/api/plaud/action-items', (_req, res) => {
-    try {
-      res.json({ items: getAllActionItems() });
-    } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
-    }
-  });
 
   // GET /api/health
   router.get('/api/health', (_req, res) => {

@@ -1,14 +1,26 @@
-import Database from 'better-sqlite3';
+import { createRequire } from 'node:module';
 import { existsSync } from 'fs';
+import type Database from 'better-sqlite3';
+
+const _require = createRequire(import.meta.url);
+
+// Load native addon at startup; gracefully handle missing/uncompiled bindings
+let DatabaseClass: (typeof Database) | null = null;
+try {
+  DatabaseClass = _require('better-sqlite3') as typeof Database;
+} catch {
+  // better-sqlite3 bindings unavailable — all queries return empty results
+}
 
 const PLAUD_DB_PATH = process.env.PLAUD_DB_PATH || 'C:\\Users\\Dell\\Desktop\\palud-mcp\\plaud-mcp.db';
 
 let _db: Database.Database | null = null;
 
 function getDb(): Database.Database | null {
+  if (!DatabaseClass) return null;
   if (_db) return _db;
   if (!existsSync(PLAUD_DB_PATH)) return null;
-  _db = new Database(PLAUD_DB_PATH, { readonly: true });
+  _db = new DatabaseClass(PLAUD_DB_PATH, { readonly: true });
   return _db;
 }
 
