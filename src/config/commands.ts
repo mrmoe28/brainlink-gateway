@@ -7,25 +7,3 @@ export const GLOBAL_ALLOWED_COMMANDS = [
   /^git\s+show\b/,
   /^git\s+rev-parse\b/,
 ];
-
-export const COMMAND_BLOCKLIST = [
-  /\brm\b.*-[a-z]*r[a-z]*f|\brm\b.*-[a-z]*f[a-z]*r|\brm\s+--recursive|\brm\s+--force/,
-  /\bsudo\b/,
-  /\bchmod\b/,
-  /\bchown\b/,
-  /curl.*\|.*sh/,
-  /\bwget\b/,
-  /\bnc\s/,
-  /\beval\b/,
-  /\bexec\b/,
-  /`[^`]+`/,
-  /\$\([^)]+\)/,
-  />\s*\/dev\//,
-  /git\s+push/,
-  /git\s+reset\s+--hard/,
-  /git\s+checkout\s+\./,
-  /git\s+clean\s+-f/,
-  /npm\s+publish/,
-  /\bkill\b/,
-  /\bpkill\b/,
-];

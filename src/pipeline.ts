@@ -11,6 +11,15 @@ import { runValidation } from './validation/runner.js';
 import { applyPatch } from './approval/actions.js';
 import type { WorkerResult } from './types/worker.js';
 
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Timed out after ${ms}ms: ${label}`)), ms)
+    ),
+  ]);
+}
+
 export async function runTaskPipeline(
   taskId: string,
   request: TaskRequest,
@@ -37,17 +46,23 @@ export async function runTaskPipeline(
     taskStore.transition(taskId, 'investigating');
     broadcast(taskId, { type: 'progress', taskId, phase: 'investigating', message: 'Starting analysis...' });
 
-    // Run Claude Code and Cowork workers in parallel
-    const [claudeCodeResult, coworkResults] = await Promise.all([
-      runClaudeCodeWorker(
-        taskId, ctx, request, state.worktreeBranch,
-        (msg) => broadcast(taskId, { type: 'progress', taskId, phase: 'investigating', worker: 'claude-code', message: msg }),
-      ),
-      dispatchInvestigationWorkers(
-        taskId, request.description, ctx,
-        (worker, msg) => broadcast(taskId, { type: 'progress', taskId, phase: 'investigating', worker, message: msg }),
-      ),
-    ]);
+    const workerTimeoutMs = settings.workerTimeoutMs;
+
+    // Run Claude Code and Cowork workers in parallel, with a combined timeout
+    const [claudeCodeResult, coworkResults] = await withTimeout(
+      Promise.all([
+        runClaudeCodeWorker(
+          taskId, ctx, request, state.worktreeBranch,
+          (msg) => broadcast(taskId, { type: 'progress', taskId, phase: 'investigating', worker: 'claude-code', message: msg }),
+        ),
+        dispatchInvestigationWorkers(
+          taskId, request.description, ctx,
+          (worker, msg) => broadcast(taskId, { type: 'progress', taskId, phase: 'investigating', worker, message: msg }),
+        ),
+      ]),
+      workerTimeoutMs,
+      'investigation workers',
+    );
 
     // Store results
     const allResults = [claudeCodeResult, ...coworkResults];

@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import type { TaskState, TaskStatus, TaskRequest } from '../types/task.js';
 
@@ -93,6 +93,8 @@ export class TaskStore {
 
   private persist(state: TaskState): void {
     const filePath = path.join(this.dataDir, `${state.taskId}.json`);
-    writeFileSync(filePath, JSON.stringify(state, null, 2));
+    const tmpPath = filePath + '.tmp';
+    writeFileSync(tmpPath, JSON.stringify(state, null, 2));
+    renameSync(tmpPath, filePath);
   }
 }

@@ -1,6 +1,10 @@
 import { Router, Request, Response } from 'express';
 import * as browser from './browser-service.js';
 import pino from 'pino';
+import { resolve, join } from 'node:path';
+import { homedir } from 'node:os';
+
+const SAFE_UPLOAD_DIR = join(homedir(), 'Downloads');
 
 const log = pino({ name: 'browse-router' });
 
@@ -26,6 +30,10 @@ browseRouter.post('/', async (req: Request, res: Response) => {
 
       case 'snapshot':
         result = { tree: await browser.snapshot() };
+        break;
+
+      case 'extract_content':
+        result = { content: await browser.extractContent() };
         break;
 
       case 'screenshot':
@@ -75,6 +83,10 @@ browseRouter.post('/', async (req: Request, res: Response) => {
         result = { message: 'Browser restarted' };
         break;
 
+      case 'hard_reset':
+        result = { message: await browser.hardResetBrowser() };
+        break;
+
       case 'scroll':
         result = { message: await browser.scroll(direction || 'down', amount) };
         break;
@@ -109,7 +121,11 @@ browseRouter.post('/', async (req: Request, res: Response) => {
 
       case 'upload_file':
         if (!selector || !filePathParam) { res.status(400).json({ error: 'selector and filePath required' }); return; }
-        result = { message: await browser.uploadFile(selector, filePathParam) };
+        if (!resolve(filePathParam).startsWith(SAFE_UPLOAD_DIR)) {
+          res.status(403).json({ error: 'filePath must be within Downloads directory' });
+          return;
+        }
+        result = { message: await browser.uploadFile(selector, resolve(filePathParam)) };
         break;
 
       case 'list_tabs':

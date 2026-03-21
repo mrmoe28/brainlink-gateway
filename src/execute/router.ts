@@ -1,8 +1,10 @@
 import { Router, type Router as RouterType } from 'express';
 import { z } from 'zod';
 import { writeFile, mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
+
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
 import { executeCode, saveTool, listTools, runTool, deleteTool } from './runner.js';
 
 const ExecuteSchema = z.object({
@@ -105,11 +107,17 @@ const UploadSchema = z.object({
 executeRouter.post('/upload', async (req, res) => {
   try {
     const body = UploadSchema.parse(req.body);
+    const byteSize = Math.round(Buffer.byteLength(body.base64, 'base64'));
+    if (byteSize > MAX_UPLOAD_BYTES) {
+      res.status(413).json({ error: 'Upload exceeds 10 MB limit' });
+      return;
+    }
     const dir = join(homedir(), 'Downloads', 'brainlink-images');
     await mkdir(dir, { recursive: true });
-    const filePath = join(dir, body.filename);
+    const safeFilename = basename(body.filename); // strip any directory components
+    const filePath = join(dir, safeFilename);
     await writeFile(filePath, Buffer.from(body.base64, 'base64'));
-    res.json({ path: filePath, size: Math.round(Buffer.byteLength(body.base64, 'base64') / 1024) });
+    res.json({ path: filePath, size: Math.round(byteSize / 1024) });
   } catch (err) {
     if (err instanceof z.ZodError) {
       res.status(400).json({ error: 'Validation error', details: err.issues });

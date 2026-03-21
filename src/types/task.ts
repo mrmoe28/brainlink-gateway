@@ -154,7 +154,8 @@ export type AuditAction =
   | 'push_executed'
   | 'pr_opened'
   | 'rollback_triggered'
-  | 'rollback_completed';
+  | 'rollback_completed'
+  | 'cleanup_error';
 
 export interface AuditEntry {
   timestamp: string;

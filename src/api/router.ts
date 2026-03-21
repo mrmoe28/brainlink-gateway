@@ -8,6 +8,7 @@ import type { AuditLogger } from '../audit/logger.js';
 import { runTaskPipeline } from '../pipeline.js';
 import { loadSettings } from '../config/settings.js';
 import { hasGithubAuth, resolveRepoSource } from '../workspace/repo-source.js';
+import { listRecordings, searchRecordings, getRecordingWithTranscript, getAllActionItems } from '../plaud/db.js';
 
 const ModexTaskRequestSchema = z.object({
   repo: z.string().min(1),
@@ -76,6 +77,8 @@ const ApproveSchema = z.object({
   action: z.enum(['apply_and_commit', 'apply_commit_and_pr', 'reject']),
   commitMessage: z.string().optional(),
 });
+
+const approvalLocks = new Set<string>();
 
 export function createRouter(
   taskStore: TaskStore,
@@ -154,8 +157,8 @@ export function createRouter(
 
   // POST /api/tasks/:id/approve
   router.post('/api/tasks/:id/approve', async (req, res) => {
+    const { id } = req.params;
     try {
-      const { id } = req.params;
       const body = ApproveSchema.parse(req.body);
       const state = taskStore.get(id);
       if (!state) {
@@ -178,6 +181,12 @@ export function createRouter(
         res.json({ taskId: id, status: 'rejected' });
         return;
       }
+
+      if (approvalLocks.has(id)) {
+        res.status(409).json({ error: 'Approval already in progress for this task' });
+        return;
+      }
+      approvalLocks.add(id);
 
       // Apply and commit
       taskStore.transition(id, 'applying');
@@ -224,6 +233,8 @@ export function createRouter(
       res.json({ taskId: id, status: 'completed', commitSha: sha, prUrl });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
+    } finally {
+      approvalLocks.delete(id);
     }
   });
 
@@ -356,6 +367,50 @@ export function createRouter(
         reposBaseDir: settings.reposBaseDir,
       },
     });
+  });
+
+  // GET /api/plaud/recordings?offset=0&limit=10
+  router.get('/api/plaud/recordings', (_req, res) => {
+    try {
+      const offset = parseInt(String(_req.query.offset ?? '0'), 10);
+      const limit = Math.min(parseInt(String(_req.query.limit ?? '10'), 10), 50);
+      res.json(listRecordings(offset, limit));
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
+    }
+  });
+
+  // GET /api/plaud/search?q=...&limit=10
+  router.get('/api/plaud/search', (_req, res) => {
+    try {
+      const q = String(_req.query.q ?? '').trim();
+      if (!q) { res.status(400).json({ error: 'q is required' }); return; }
+      const limit = Math.min(parseInt(String(_req.query.limit ?? '10'), 10), 50);
+      res.json(searchRecordings(q, limit));
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
+    }
+  });
+
+  // GET /api/plaud/recording/:id
+  router.get('/api/plaud/recording/:id', (_req, res) => {
+    try {
+      const id = parseInt(_req.params.id, 10);
+      const recording = getRecordingWithTranscript(id);
+      if (!recording) { res.status(404).json({ error: 'Recording not found' }); return; }
+      res.json(recording);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
+    }
+  });
+
+  // GET /api/plaud/action-items
+  router.get('/api/plaud/action-items', (_req, res) => {
+    try {
+      res.json({ items: getAllActionItems() });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Unknown error' });
+    }
   });
 
   // GET /api/health

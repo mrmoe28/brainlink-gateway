@@ -1,6 +1,7 @@
 import express from 'express';
 import { createServer } from 'node:http';
 import path from 'node:path';
+import { rateLimit } from 'express-rate-limit';
 import { loadSettings } from './config/settings.js';
 import { loadRepoConfig } from './config/repos.js';
 import { authMiddleware } from './security/auth.js';
@@ -11,6 +12,7 @@ import { setupWebSocket, broadcast } from './api/websocket.js';
 import { requestId, errorHandler } from './api/middleware.js';
 import { browseRouter } from './browse/router.js';
 import { executeRouter } from './execute/router.js';
+import { sessionRouter } from './api/session-router.js';
 import { hasGithubAuth } from './workspace/repo-source.js';
 
 // Load env
@@ -33,6 +35,11 @@ const app = express();
 app.use(express.json({ limit: '20mb' }));
 app.use(requestId);
 
+// Rate limiting — 120 req/min per IP globally, stricter on task creation
+const globalLimiter = rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false });
+const taskLimiter = rateLimit({ windowMs: 60_000, max: 20, standardHeaders: true, legacyHeaders: false });
+app.use(globalLimiter);
+
 // Serve desktop web UI (public, no auth)
 app.use(express.static(path.resolve(import.meta.dirname ?? process.cwd(), '../public')));
 
@@ -42,8 +49,10 @@ app.get('/api/config', (_req, res) => {
 });
 
 // Proxy Claude API calls so desktop UI doesn't need the API key
-app.post('/api/chat', express.json({ limit: '20mb' }), async (req, res) => {
+app.post('/api/chat', async (req, res) => {
   try {
+    // Strip any caller-supplied api key to prevent override
+    const { 'x-api-key': _stripped, ...safeBody } = req.body ?? {};
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -51,7 +60,7 @@ app.post('/api/chat', express.json({ limit: '20mb' }), async (req, res) => {
         'x-api-key': settings.anthropicApiKey,
         'anthropic-version': '2023-06-01',
       },
-      body: JSON.stringify(req.body),
+      body: JSON.stringify(safeBody),
     });
     const data = await response.json();
     res.status(response.status).json(data);
@@ -79,16 +88,22 @@ app.get('/api/sync', async (_req, res) => {
   res.json(await loadSync());
 });
 
-app.post('/api/sync', express.json(), async (req, res) => {
+const SYNC_ALLOWED_KEYS = new Set(['logins', 'rules', 'settings']);
+
+app.post('/api/sync', express.json({ limit: '100kb' }), async (req, res) => {
+  const unknown = Object.keys(req.body ?? {}).filter(k => !SYNC_ALLOWED_KEYS.has(k));
+  if (unknown.length > 0) {
+    res.status(400).json({ error: `Unknown sync fields: ${unknown.join(', ')}` });
+    return;
+  }
   const current = await loadSync();
   const updated = { ...current, ...req.body };
   await saveSync(updated);
   res.json(updated);
 });
 
-app.patch('/api/sync', express.json(), async (req, res) => {
+app.patch('/api/sync', express.json({ limit: '100kb' }), async (req, res) => {
   const current = await loadSync();
-  // Merge specific keys
   if (req.body.logins) current.logins = req.body.logins;
   if (req.body.rules) current.rules = req.body.rules;
   if (req.body.settings) current.settings = { ...current.settings, ...req.body.settings };
@@ -160,8 +175,10 @@ app.get('/api/health', (_req, res) => {
 
 // Protected routes
 app.use(authMiddleware(settings.gatewaySecret));
+app.post('/api/tasks', taskLimiter);
 app.use('/api/browse', browseRouter);
 app.use('/api/execute', executeRouter);
+app.use('/api/sessions', sessionRouter);
 app.use(createRouter(taskStore, repoRegistry, audit, broadcast, startTime));
 
 // Error handler (must be last)
@@ -186,7 +203,9 @@ const cleanupInterval = setInterval(() => {
           taskStore.transition(task.taskId, 'expired');
           audit.log(task.taskId, 'approval_expired', 'gateway', {});
           broadcast(task.taskId, { type: 'task_expired', taskId: task.taskId });
-        } catch {}
+        } catch (e) {
+          audit.log(task.taskId, 'cleanup_error', 'gateway', { error: String(e) });
+        }
       }
     }
 
@@ -197,7 +216,9 @@ const cleanupInterval = setInterval(() => {
         try {
           taskStore.transition(task.taskId, 'failed');
           audit.log(task.taskId, 'worker_failed', 'gateway', { reason: 'stale' });
-        } catch {}
+        } catch (e) {
+          audit.log(task.taskId, 'cleanup_error', 'gateway', { error: String(e) });
+        }
       }
     }
   }
@@ -212,10 +233,22 @@ for (const task of recoveredTasks) {
     taskStore.transition(task.taskId, 'failed');
     audit.log(task.taskId, 'worker_failed', 'gateway', { reason: 'gateway_restarted' });
     console.log(`Recovered stale task: ${task.taskId} (was ${task.status})`);
-  } catch {}
+  } catch (e) {
+    console.error(`Failed to recover task ${task.taskId}:`, e);
+  }
 }
 
-// Start server
+// Start server — exit cleanly on EADDRINUSE so PM2 can restart after port frees
+server.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${settings.port} in use — exiting so PM2 can retry after port is freed.`);
+    process.exit(1);
+  } else {
+    console.error('Server error:', err);
+    process.exit(1);
+  }
+});
+
 server.listen(settings.port, () => {
   console.log(`Brain Link Local Agent Gateway running on port ${settings.port}`);
   console.log(`Repos: ${Object.keys(repoRegistry).join(', ')}`);
