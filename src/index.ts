@@ -13,6 +13,7 @@ import { requestId, errorHandler } from './api/middleware.js';
 import { browseRouter } from './browse/router.js';
 import { executeRouter } from './execute/router.js';
 import { sessionRouter } from './api/session-router.js';
+import { sshRouter } from './ssh/router.js';
 import { hasGithubAuth } from './workspace/repo-source.js';
 
 // Load env
@@ -43,8 +44,13 @@ app.use(globalLimiter);
 // Serve desktop web UI (public, no auth)
 app.use(express.static(path.resolve(import.meta.dirname ?? process.cwd(), '../public')));
 
-// Desktop web UI config (no auth needed — same machine)
-app.get('/api/config', (_req, res) => {
+// Desktop web UI config — localhost only (never expose via Cloudflare tunnel)
+app.get('/api/config', (req, res) => {
+  const ip = req.socket.remoteAddress;
+  if (ip !== '127.0.0.1' && ip !== '::1' && ip !== '::ffff:127.0.0.1') {
+    res.status(403).json({ error: 'Forbidden' });
+    return;
+  }
   res.json({ gatewayKey: settings.gatewaySecret });
 });
 
@@ -173,12 +179,39 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
+// Ollama chat proxy — lets the mobile app route through the gateway
+// instead of hitting ollama.lock28.com directly (unreachable from mobile networks)
+app.post('/api/ollama/chat', async (req, res) => {
+  try {
+    const ollamaRes = await fetch(`${OLLAMA_URL}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body),
+    });
+    const data = await ollamaRes.json();
+    res.status(ollamaRes.status).json(data);
+  } catch (err) {
+    res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get('/api/ollama/models', async (_req, res) => {
+  try {
+    const tagsRes = await fetch(`${OLLAMA_URL}/api/tags`);
+    const data = await tagsRes.json();
+    res.json(data);
+  } catch (err) {
+    res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 // Protected routes
 app.use(authMiddleware(settings.gatewaySecret));
 app.post('/api/tasks', taskLimiter);
 app.use('/api/browse', browseRouter);
 app.use('/api/execute', executeRouter);
 app.use('/api/sessions', sessionRouter);
+app.use('/api/ssh', sshRouter);
 app.use(createRouter(taskStore, repoRegistry, audit, broadcast, startTime));
 
 // Error handler (must be last)
@@ -187,8 +220,32 @@ app.use(errorHandler);
 // HTTP server
 const server = createServer(app);
 
+server.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`[ERROR] Port ${settings.port} already in use. Is another instance running?`);
+  } else {
+    console.error('[ERROR] Server error:', err.message);
+  }
+  process.exit(1);
+});
+
 // WebSocket
 setupWebSocket(server, settings.gatewaySecret);
+
+// Ollama keep-alive — ping every 3 minutes to keep the model loaded in VRAM/RAM
+// Prevents 90-second cold starts and Cloudflare 524 timeouts
+const ollamaKeepAliveInterval = setInterval(async () => {
+  try {
+    await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'llama3.2:1b-instruct-q4_K_M', prompt: '', keep_alive: '10m' }),
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch {
+    // Silent — VPS may be temporarily unreachable
+  }
+}, 3 * 60 * 1000);
 
 // Stale cleanup interval (every hour)
 const cleanupInterval = setInterval(() => {
@@ -261,6 +318,7 @@ server.listen(settings.port, () => {
 process.on('SIGINT', () => {
   console.log('Shutting down...');
   clearInterval(cleanupInterval);
+  clearInterval(ollamaKeepAliveInterval);
   server.close();
   process.exit(0);
 });
@@ -268,6 +326,18 @@ process.on('SIGINT', () => {
 process.on('SIGTERM', () => {
   console.log('Shutting down...');
   clearInterval(cleanupInterval);
+  clearInterval(ollamaKeepAliveInterval);
   server.close();
   process.exit(0);
+});
+
+// Global safety net — prevents silent crashes from unhandled async errors
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err.message, err.stack);
+  // Stay alive — log and continue
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] Unhandled promise rejection:', reason);
+  // Stay alive — log and continue
 });

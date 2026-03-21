@@ -1,5 +1,17 @@
 import { WebSocketServer, WebSocket } from 'ws';
+import { timingSafeEqual } from 'node:crypto';
 import type { Server } from 'node:http';
+
+function safeCompare(a: string, b: string): boolean {
+  try {
+    const bufA = Buffer.from(a);
+    const bufB = Buffer.from(b);
+    if (bufA.length !== bufB.length) return false;
+    return timingSafeEqual(bufA, bufB);
+  } catch {
+    return false;
+  }
+}
 
 interface WSClient {
   ws: WebSocket;
@@ -32,7 +44,7 @@ export function setupWebSocket(server: Server, gatewaySecret: string): void {
         const msg = JSON.parse(data.toString());
 
         if (msg.type === 'auth') {
-          if (msg.key === gatewaySecret) {
+          if (safeCompare(String(msg.key ?? ''), gatewaySecret)) {
             client.authenticated = true;
             ws.send(JSON.stringify({ type: 'auth_ok' }));
           } else {
@@ -76,6 +88,10 @@ export function setupWebSocket(server: Server, gatewaySecret: string): void {
       clients.delete(ws);
     });
   });
+}
+
+export function clearEventBuffer(taskId: string): void {
+  eventBuffers.delete(taskId);
 }
 
 export function broadcast(taskId: string, event: any): void {

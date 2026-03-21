@@ -78,9 +78,15 @@ export class TaskStore {
 
   list(): TaskState[] {
     if (!existsSync(this.dataDir)) return [];
-    return readdirSync(this.dataDir)
-      .filter(f => f.endsWith('.json'))
-      .map(f => JSON.parse(readFileSync(path.join(this.dataDir, f), 'utf-8')));
+    const results: TaskState[] = [];
+    for (const f of readdirSync(this.dataDir).filter(f => f.endsWith('.json'))) {
+      try {
+        results.push(JSON.parse(readFileSync(path.join(this.dataDir, f), 'utf-8')));
+      } catch {
+        console.error(`[TaskStore] Skipping corrupt task file: ${f}`);
+      }
+    }
+    return results;
   }
 
   listByStatus(status: TaskStatus): TaskState[] {
