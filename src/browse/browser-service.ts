@@ -1,121 +1,60 @@
-import { chromium, BrowserContext, Browser, Page } from 'playwright';
-import { spawn } from 'node:child_process';
-import { accessSync } from 'node:fs';
+import { chromium, BrowserContext, Page } from 'playwright';
 import path from 'node:path';
+import { mkdir } from 'node:fs/promises';
 import pino from 'pino';
 
 const log = pino({ name: 'browser-service' });
 
-const CDP_PORT = parseInt(process.env.CHROME_DEBUG_PORT || '9222');
-const CDP_URL = `http://127.0.0.1:${CDP_PORT}`;
+// Dedicated profile directory — separate from the user's real Chrome, no conflicts
+const PROFILE_DIR = process.env.BROWSER_PROFILE_DIR
+  || path.join(process.env.LOCALAPPDATA || process.env.HOME || '', 'BrainLink', 'browser-profile');
 
-// Real Chrome user data dir (Windows default, overridable via env)
-const USER_DATA_DIR = process.env.CHROME_USER_DATA
-  || path.join(process.env.LOCALAPPDATA || process.env.HOME || '', 'Google/Chrome/User Data');
-
-// Common Chrome paths on Windows
-const CHROME_PATHS = [
-  path.join(process.env.PROGRAMFILES || '', 'Google/Chrome/Application/chrome.exe'),
-  path.join(process.env['PROGRAMFILES(X86)'] || '', 'Google/Chrome/Application/chrome.exe'),
-  path.join(process.env.LOCALAPPDATA || '', 'Google/Chrome/Application/chrome.exe'),
-];
-
-let browser: Browser | null = null;
 let context: BrowserContext | null = null;
 let page: Page | null = null;
 
-function findChromeExe(): string | null {
-  for (const p of CHROME_PATHS) {
-    try { accessSync(p); return p; } catch {}
-  }
-  return null;
-}
-
-// Check if Chrome is already listening on the debug port
-async function isCdpAvailable(): Promise<boolean> {
-  try {
-    const res = await fetch(`${CDP_URL}/json/version`, { signal: AbortSignal.timeout(1500) });
-    return res.ok;
-  } catch { return false; }
-}
-
-// Launch Chrome with debugging enabled (reuses existing profile)
-async function ensureChromeWithDebugging(): Promise<void> {
-  if (await isCdpAvailable()) {
-    log.info('Chrome already running with CDP on port %d', CDP_PORT);
-    return;
-  }
-
-  log.info('Starting Chrome with remote debugging on port %d...', CDP_PORT);
-  const exe = findChromeExe();
-  if (!exe) throw new Error('Chrome not found. Install Google Chrome or set CHROME_USER_DATA.');
-
-  // Spawn Chrome detached so it outlives the gateway process
-  const child = spawn(exe, [
-    `--remote-debugging-port=${CDP_PORT}`,
-    `--user-data-dir=${USER_DATA_DIR}`,
-    '--disable-blink-features=AutomationControlled',
-    '--restore-last-session',
-  ], { detached: true, stdio: 'ignore' });
-  child.unref();
-
-  // Wait for CDP to become available (up to 10s)
-  for (let i = 0; i < 20; i++) {
-    await new Promise(r => setTimeout(r, 500));
-    if (await isCdpAvailable()) {
-      log.info('Chrome CDP ready');
-      return;
-    }
-  }
-  throw new Error('Chrome started but CDP not responding. Check if another Chrome instance is blocking the profile.');
-}
-
-async function connectToChrome(): Promise<BrowserContext> {
-  await ensureChromeWithDebugging();
-
-  log.info('Connecting to Chrome via CDP...');
-  browser = await chromium.connectOverCDP(CDP_URL);
-  const contexts = browser.contexts();
-  if (contexts.length > 0) {
-    // Use the first (default) context — this is your real Chrome session
-    const ctx = contexts[0];
-    const pages = ctx.pages();
-    if (pages.length > 0) page = pages[0];
-    return ctx;
-  }
-  // Fallback: create a new context (shouldn't normally happen)
-  return await browser.newContext({ viewport: { width: 1280, height: 800 } });
-}
-
-export async function getContext(): Promise<BrowserContext> {
-  // Check if existing context is still alive
+async function getContext(): Promise<BrowserContext> {
   if (context) {
     try {
-      // Quick health check — if browser was closed this throws
+      // Health check — accessing pages() throws if context was closed
       context.pages();
+      return context;
     } catch {
-      log.warn('Browser context dead, reconnecting...');
+      log.warn('Browser context closed, relaunching...');
       context = null;
-      browser = null;
       page = null;
     }
   }
-  if (!context) {
-    context = await connectToChrome();
-  }
-  return context;
-}
 
-export async function restartBrowser(): Promise<void> {
-  await closeBrowser();
-  context = await connectToChrome();
-  log.info('Browser reconnected');
+  log.info('Launching Playwright Chromium (persistent profile at %s)...', PROFILE_DIR);
+  await mkdir(PROFILE_DIR, { recursive: true });
+
+  context = await chromium.launchPersistentContext(PROFILE_DIR, {
+    headless: false,
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--no-first-run',
+      '--no-default-browser-check',
+    ],
+    viewport: { width: 1280, height: 800 },
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    ignoreHTTPSErrors: true,
+  });
+
+  context.on('close', () => {
+    log.info('Browser context closed');
+    context = null;
+    page = null;
+  });
+
+  log.info('Playwright Chromium ready');
+  return context;
 }
 
 export async function getPage(): Promise<Page> {
   const ctx = await getContext();
   if (!page || page.isClosed()) {
-    page = await ctx.newPage();
+    const pages = ctx.pages();
+    page = pages.length > 0 ? pages[0] : await ctx.newPage();
   }
   return page;
 }
@@ -130,7 +69,6 @@ export async function snapshot(): Promise<string> {
   const p = await getPage();
   const title = await p.title();
   const url = p.url();
-  // Get page text content as a lightweight snapshot
   const text = await p.evaluate(() => {
     const elements: string[] = [];
     document.querySelectorAll('a, button, input, select, textarea, h1, h2, h3, h4, label').forEach(el => {
@@ -156,6 +94,33 @@ export async function snapshot(): Promise<string> {
   return `Page: ${title}\nURL: ${url}\n\nElements:\n${text}`.slice(0, 6000);
 }
 
+// Extract the main readable content from the current page (article body, search results, etc.)
+export async function extractContent(): Promise<string> {
+  const p = await getPage();
+  const title = await p.title();
+  const url = p.url();
+
+  const content = await p.evaluate(() => {
+    // Try common content containers first
+    const selectors = [
+      'article', 'main', '[role="main"]',
+      '.content', '#content', '.article-body',
+      '.search-results', '#search', '.results',
+    ];
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (el) {
+        const text = (el as HTMLElement).innerText?.trim();
+        if (text && text.length > 200) return text.slice(0, 8000);
+      }
+    }
+    // Fallback: full body text
+    return document.body.innerText?.trim().slice(0, 8000) || '';
+  });
+
+  return `Page: ${title}\nURL: ${url}\n\n${content}`;
+}
+
 export async function screenshot(): Promise<string> {
   const p = await getPage();
   const buffer = await p.screenshot({ type: 'png' });
@@ -166,7 +131,7 @@ export async function click(selector: string): Promise<string> {
   const p = await getPage();
   try {
     await p.click(selector, { timeout: 10000 });
-    await p.waitForTimeout(1000);
+    await p.waitForTimeout(800);
     return `Clicked: ${selector}`;
   } catch (err) {
     return `Click failed: ${err instanceof Error ? err.message : String(err)}`;
@@ -244,7 +209,6 @@ export async function evaluate(code: string): Promise<string> {
   }
 }
 
-// Scroll the page
 export async function scroll(direction: 'up' | 'down', amount?: number): Promise<string> {
   const p = await getPage();
   const px = amount || 500;
@@ -254,7 +218,6 @@ export async function scroll(direction: 'up' | 'down', amount?: number): Promise
   return `Scrolled ${direction} ${px}px`;
 }
 
-// Hover over an element
 export async function hover(selector: string): Promise<string> {
   const p = await getPage();
   try {
@@ -265,7 +228,6 @@ export async function hover(selector: string): Promise<string> {
   }
 }
 
-// Select dropdown option
 export async function selectOption(selector: string, value: string): Promise<string> {
   const p = await getPage();
   try {
@@ -276,7 +238,6 @@ export async function selectOption(selector: string, value: string): Promise<str
   }
 }
 
-// Wait for an element to appear
 export async function waitFor(selector: string, timeoutMs?: number): Promise<string> {
   const p = await getPage();
   try {
@@ -287,33 +248,29 @@ export async function waitFor(selector: string, timeoutMs?: number): Promise<str
   }
 }
 
-// Click element by visible text
 export async function clickText(text: string): Promise<string> {
   const p = await getPage();
   try {
     await p.getByText(text, { exact: false }).first().click({ timeout: 10000 });
-    await p.waitForTimeout(1000);
+    await p.waitForTimeout(800);
     return `Clicked element with text: "${text}"`;
   } catch (err) {
     return `Click by text failed: ${err instanceof Error ? err.message : String(err)}`;
   }
 }
 
-// Go back
 export async function goBack(): Promise<string> {
   const p = await getPage();
   await p.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 });
   return `Navigated back to: ${p.url()}`;
 }
 
-// Go forward
 export async function goForward(): Promise<string> {
   const p = await getPage();
   await p.goForward({ waitUntil: 'domcontentloaded', timeout: 15000 });
   return `Navigated forward to: ${p.url()}`;
 }
 
-// Upload a file to a file input
 export async function uploadFile(selector: string, filePath: string): Promise<string> {
   const p = await getPage();
   try {
@@ -324,7 +281,6 @@ export async function uploadFile(selector: string, filePath: string): Promise<st
   }
 }
 
-// List open tabs
 export async function listTabs(): Promise<{ index: number; title: string; url: string }[]> {
   const ctx = await getContext();
   const pages = ctx.pages();
@@ -335,7 +291,6 @@ export async function listTabs(): Promise<{ index: number; title: string; url: s
   })));
 }
 
-// Switch to a tab by index
 export async function switchTab(index: number): Promise<string> {
   const ctx = await getContext();
   const pages = ctx.pages();
@@ -345,19 +300,28 @@ export async function switchTab(index: number): Promise<string> {
   return `Switched to tab ${index}: ${page.url()}`;
 }
 
-// Get current page URL and title
 export async function currentPage(): Promise<{ title: string; url: string }> {
   const p = await getPage();
   return { title: await p.title(), url: p.url() };
 }
 
+export async function restartBrowser(): Promise<void> {
+  await closeBrowser();
+  await getContext(); // relaunch immediately
+  log.info('Browser restarted');
+}
+
+export async function hardResetBrowser(): Promise<string> {
+  await closeBrowser();
+  await getContext(); // relaunch
+  return 'Browser hard reset complete. Playwright Chromium relaunched fresh. Ready to browse.';
+}
+
 export async function closeBrowser(): Promise<void> {
-  // Disconnect from Chrome without killing it — user's browser stays open
   page = null;
-  context = null;
-  if (browser) {
-    await browser.close().catch(() => {});
-    browser = null;
+  if (context) {
+    await context.close().catch(() => {});
+    context = null;
   }
-  log.info('Disconnected from Chrome (browser still running)');
+  log.info('Browser closed');
 }
