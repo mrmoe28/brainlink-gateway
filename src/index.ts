@@ -12,7 +12,6 @@ import { setupWebSocket, broadcast } from './api/websocket.js';
 import { requestId, errorHandler } from './api/middleware.js';
 import { browseRouter } from './browse/router.js';
 import { executeRouter } from './execute/router.js';
-import { sessionRouter } from './api/session-router.js';
 import { sshRouter } from './ssh/router.js';
 import { hasGithubAuth } from './workspace/repo-source.js';
 
@@ -210,7 +209,6 @@ app.use(authMiddleware(settings.gatewaySecret));
 app.post('/api/tasks', taskLimiter);
 app.use('/api/browse', browseRouter);
 app.use('/api/execute', executeRouter);
-app.use('/api/sessions', sessionRouter);
 app.use('/api/ssh', sshRouter);
 app.use(createRouter(taskStore, repoRegistry, audit, broadcast, startTime));
 
