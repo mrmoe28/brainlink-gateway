@@ -230,7 +230,7 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 
 // WebSocket
 setupWebSocket(server, settings.gatewaySecret);
-startMonitorWorker();
+const monitorInterval = startMonitorWorker();
 
 // Ollama keep-alive — ping every 3 minutes to keep the model loaded in VRAM/RAM
 // Prevents 90-second cold starts and Cloudflare 524 timeouts
@@ -319,6 +319,7 @@ process.on('SIGINT', () => {
   console.log('Shutting down...');
   clearInterval(cleanupInterval);
   clearInterval(ollamaKeepAliveInterval);
+  clearInterval(monitorInterval);
   server.close();
   process.exit(0);
 });
@@ -327,6 +328,7 @@ process.on('SIGTERM', () => {
   console.log('Shutting down...');
   clearInterval(cleanupInterval);
   clearInterval(ollamaKeepAliveInterval);
+  clearInterval(monitorInterval);
   server.close();
   process.exit(0);
 });
