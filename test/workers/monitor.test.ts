@@ -39,4 +39,9 @@ describe('compileAlerts', () => {
   it('handles empty inputs', () => {
     expect(compileAlerts([], [])).toEqual([]);
   });
+
+  it('ignores tasks that are not blocked', () => {
+    const alerts = compileAlerts([], [{ id: 't2', project_id: 'p1', title: 'Pending', status: 'pending' }]);
+    expect(alerts).toHaveLength(0);
+  });
 });

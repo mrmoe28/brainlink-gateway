@@ -30,7 +30,8 @@ export function compileAlerts(projects: ProjectRow[], tasks: TaskRow[]): Proacti
 
   for (const p of projects) {
     if (!p.deadline) continue;
-    const deadlineMs = new Date(p.deadline).getTime();
+    const deadlineMs = Date.parse(p.deadline);
+    if (isNaN(deadlineMs)) continue;
     if (deadlineMs < now) {
       alerts.push({
         id: `overdue:${p.id}`,
@@ -54,6 +55,7 @@ export function compileAlerts(projects: ProjectRow[], tasks: TaskRow[]): Proacti
   }
 
   for (const t of tasks) {
+    if (t.status !== 'blocked') continue;
     alerts.push({
       id: `blocked:${t.id}`,
       kind: 'blocked_task',
