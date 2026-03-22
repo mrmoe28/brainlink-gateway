@@ -111,3 +111,12 @@ export function broadcast(taskId: string, event: any): void {
     }
   });
 }
+
+export function broadcastToAll(event: Record<string, unknown>): void {
+  const message = JSON.stringify({ ...event, timestamp: new Date().toISOString() });
+  clients.forEach((client) => {
+    if (client.authenticated && client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(message);
+    }
+  });
+}
