@@ -1,3 +1,5 @@
+import { broadcastToAll } from '../api/websocket.js';
+
 export interface ProactiveAlert {
   id: string;
   kind: 'approaching_deadline' | 'overdue' | 'blocked_task';
@@ -68,4 +70,53 @@ export function compileAlerts(projects: ProjectRow[], tasks: TaskRow[]): Proacti
   }
 
   return alerts;
+}
+
+async function fetchActiveProjects(): Promise<ProjectRow[]> {
+  const SUPABASE_URL = process.env.SUPABASE_URL ?? '';
+  const SUPABASE_KEY = process.env.SUPABASE_KEY ?? '';
+  if (!SUPABASE_URL || !SUPABASE_KEY) return [];
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/agent_projects?select=id,title,status,deadline&status=eq.active`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } },
+    );
+    if (!res.ok) return [];
+    return res.json() as Promise<ProjectRow[]>;
+  } catch {
+    return [];
+  }
+}
+
+async function fetchBlockedTasks(): Promise<TaskRow[]> {
+  const SUPABASE_URL = process.env.SUPABASE_URL ?? '';
+  const SUPABASE_KEY = process.env.SUPABASE_KEY ?? '';
+  if (!SUPABASE_URL || !SUPABASE_KEY) return [];
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/agent_tasks?select=id,project_id,title,status&status=eq.blocked`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } },
+    );
+    if (!res.ok) return [];
+    return res.json() as Promise<TaskRow[]>;
+  } catch {
+    return [];
+  }
+}
+
+async function runMonitorCycle(): Promise<void> {
+  try {
+    const [projects, tasks] = await Promise.all([fetchActiveProjects(), fetchBlockedTasks()]);
+    const alerts = compileAlerts(projects, tasks);
+    if (alerts.length > 0) {
+      broadcastToAll({ type: 'proactive_alert', alerts });
+    }
+  } catch (err) {
+    console.error('[monitor] cycle error:', err instanceof Error ? err.message : String(err));
+  }
+}
+
+export function startMonitorWorker(intervalMs = 15 * 60 * 1000): NodeJS.Timeout {
+  void runMonitorCycle(); // run immediately on startup
+  return setInterval(runMonitorCycle, intervalMs);
 }
