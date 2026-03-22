@@ -10,6 +10,7 @@ import { TaskStore } from './approval/queue.js';
 import { createRouter } from './api/router.js';
 import { setupWebSocket, broadcast } from './api/websocket.js';
 import { requestId, errorHandler } from './api/middleware.js';
+import { startMonitorWorker } from './workers/monitor.js';
 import { browseRouter } from './browse/router.js';
 import { executeRouter } from './execute/router.js';
 import { sshRouter } from './ssh/router.js';
@@ -229,6 +230,7 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 
 // WebSocket
 setupWebSocket(server, settings.gatewaySecret);
+startMonitorWorker();
 
 // Ollama keep-alive — ping every 3 minutes to keep the model loaded in VRAM/RAM
 // Prevents 90-second cold starts and Cloudflare 524 timeouts
