@@ -170,25 +170,6 @@ export async function getText(): Promise<string> {
   return text.slice(0, 8000);
 }
 
-export async function extractContent(): Promise<string> {
-  const p = await getPage();
-  const content = await p.evaluate(() => {
-    const title = document.title;
-    const text = document.body.innerText;
-    return `Title: ${title}\n\n${text}`;
-  });
-  return content.slice(0, 16000);
-}
-
-export async function hardResetBrowser(): Promise<string> {
-  await closeBrowser();
-  context = null;
-  page = null;
-  context = await connectToChrome();
-  log.info('Browser hard reset complete');
-  return 'Browser hard reset complete';
-}
-
 export async function getLinks(): Promise<{ text: string; href: string }[]> {
   const p = await getPage();
   return p.evaluate(() =>
