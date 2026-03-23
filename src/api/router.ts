@@ -369,6 +369,44 @@ export function createRouter(
   });
 
 
+  // GET /api/ollama/models — proxy to local Ollama instance
+  router.get('/api/ollama/models', async (_req, res) => {
+    try {
+      const ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434';
+      const resp = await fetch(`${ollamaUrl}/api/tags`);
+      if (!resp.ok) {
+        res.status(502).json({ error: 'Ollama returned ' + resp.status });
+        return;
+      }
+      const data = await resp.json() as any;
+      res.json(data);
+    } catch (err) {
+      res.status(502).json({ error: 'Cannot reach Ollama', detail: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // POST /api/ollama/chat — proxy chat to local Ollama, return OpenAI-compatible response
+  router.post('/api/ollama/chat', async (req, res) => {
+    try {
+      const ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434';
+      const resp = await fetch(`${ollamaUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body),
+      });
+      if (!resp.ok) {
+        const errText = await resp.text();
+        res.status(502).json({ error: errText });
+        return;
+      }
+      const data = await resp.json() as any;
+      // Convert Ollama native format → OpenAI-compatible so the mobile client works
+      res.json({ choices: [{ message: { role: 'assistant', content: data.message?.content ?? '' } }] });
+    } catch (err) {
+      res.status(502).json({ error: 'Cannot reach Ollama', detail: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // GET /api/health
   router.get('/api/health', (_req, res) => {
     const allTasks = taskStore.list();

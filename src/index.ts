@@ -205,6 +205,26 @@ app.get('/api/ollama/models', async (_req, res) => {
   }
 });
 
+app.post('/api/ollama/pull', async (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'model name required' });
+
+  // Respond immediately — model pulls can take minutes and Cloudflare will 524 if we wait
+  res.json({ status: 'pulling', model: name, message: 'Pull started in background. Check /api/ollama/models to confirm when ready.' });
+
+  // Fire-and-forget pull in background
+  fetch(`${OLLAMA_URL}/api/pull`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, stream: false }),
+  }).then(async (r) => {
+    const data = await r.json().catch(() => ({}));
+    console.log(`[ollama:pull] ${name} → ${(data as any).status || r.status}`);
+  }).catch((err) => {
+    console.error(`[ollama:pull] ${name} failed:`, err.message);
+  });
+});
+
 // Protected routes
 app.use(authMiddleware(settings.gatewaySecret));
 app.post('/api/tasks', taskLimiter);
@@ -306,7 +326,7 @@ server.on('error', (err: NodeJS.ErrnoException) => {
   }
 });
 
-server.listen(settings.port, () => {
+server.listen(settings.port, '0.0.0.0', () => {
   console.log(`Brain Link Local Agent Gateway running on port ${settings.port}`);
   console.log(`Repos: ${Object.keys(repoRegistry).join(', ')}`);
   console.log(`GitHub default owner: ${settings.githubDefaultOwner}`);
